@@ -1,0 +1,57 @@
+# Local Python environments
+marl_fyp/
+.venv/
+venv/
+env/
+
+# Downloaded third-party repositories
+metadrive/
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local editor and OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local application data and credentials
+users.json
+tickets.json
+.env
+.env.*
+*.pem
+*.key
+
+# Training, evaluation, and runtime output
+MAPPO_AVs/mappo/results/
+MAPPO_AVs/mappo/drawgraph/*.json
+MAPPO_AVs/mappo/FYP_SUBMISSION/
+MAPPO_AVs/mappo/train/*.png
+wandb/
+runs/
+checkpoints/
+videos/
+screenshots*/
+FYP_Screenshots/
+*.pt
+*.pth
+*.ckpt
+events.out.tfevents.*
+*.log
+
+# Documentation/presentation assets not required by the code repository
+diagrams/
+*.png
+*.jpg
+*.jpeg
+*.jfif
+*.gif
+*.mp4
+*.avi
