@@ -51,6 +51,11 @@ AutonomousVehicleMAPPO/
 ├── main.py                         # Main Streamlit dashboard
 ├── unified_dash.py                 # Dashboard with local authentication
 ├── user_support_tab.py             # Support-ticket UI component
+├── app_config.py                   # Portable paths and environment overrides
+├── auth_store.py                   # Salted local authentication storage
+├── checkpoint_utils.py             # Shared checkpoint discovery
+├── simulation_utils.py             # MetaDrive compatibility helpers
+├── tests/                           # Focused unit tests
 ├── MAPPO_AVs/
 │   ├── requirements.txt            # Core dependency entry point
 │   ├── LICENSE
@@ -100,12 +105,6 @@ source .venv/bin/activate
 ```bash
 python -m pip install --upgrade pip
 pip install -r MAPPO_AVs/requirements.txt
-```
-
-### 4. Install dashboard dependencies
-
-```bash
-pip install streamlit pandas plotly pillow tensorboard mss opencv-python
 ```
 
 > A CUDA-enabled PyTorch installation is recommended for training but is not required for basic evaluation or dashboard use.
@@ -229,11 +228,33 @@ Run the following command to see all available options:
 python MAPPO_AVs/mappo/train/train.py --help
 ```
 
+## Testing
+
+The dependency-free utility tests can be run from the repository root:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## Current Implementation Notes
 
-- Some paths in `main.py`, `unified_dash.py`, and `MAPPO_AVs/mappo/train/train.py` are currently configured for a Windows development environment. Update those path constants for your machine before using checkpoint discovery or output capture.
-- `unified_dash.py` uses a local `users.json` file for demonstration authentication. The file is ignored by Git, but the current plaintext-password approach must be replaced with hashing and a database before deployment.
+- Runtime paths are repository-relative by default and can be overridden with environment variables.
+- `unified_dash.py` stores salted PBKDF2 password hashes in a local ignored data file. This is suitable for a local demonstration; use a managed identity provider and database for a public deployment.
 - Trained models and datasets are not included in this source-only repository.
+
+### Optional environment variables
+
+| Variable | Purpose |
+|---|---|
+| `AV_MAPPO_RESULTS_DIR` | Training results and checkpoint root |
+| `AV_MAPPO_TRAIN_SCRIPT` | Training/evaluation entry-point path |
+| `AV_MAPPO_PYTHON` | Python executable used by dashboard subprocesses |
+| `AV_MAPPO_DATA_DIR` | Local runtime-data directory |
+| `AV_MAPPO_SCREENSHOT_DIR` | Generated simulation screenshots |
+| `AV_MAPPO_EVALUATION_DIR` | Evaluation videos and outputs |
+| `AV_MAPPO_USERS_FILE` | Local authentication database |
+| `AV_MAPPO_SUPPORT_FILE` | Local support-ticket database |
+| `AV_MAPPO_WATERMARK` | Screenshot watermark text |
 
 ## Security and Repository Hygiene
 

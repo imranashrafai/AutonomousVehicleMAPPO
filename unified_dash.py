@@ -1,18 +1,13 @@
-# unified_dashboard.py
-import os
 import base64
-import streamlit as st
-import sys
+import subprocess
+import tempfile
 import time
-import json
 import traceback
 from pathlib import Path
-import glob
-import subprocess
-import threading
-import imageio
 
-# NEW: screen capture for evaluation video
+import imageio
+import streamlit as st
+
 try:
     import mss
     MSS_AVAILABLE = True
@@ -20,20 +15,28 @@ except ImportError:
     mss = None
     MSS_AVAILABLE = False
 
-# Try to insert VENV path early
-try:
-    VENV_PATH = Path(sys.executable).parent.parent / "Lib" / "site-packages"
-    if str(VENV_PATH) not in sys.path:
-        sys.path.insert(0, str(VENV_PATH))
-except Exception:
-    pass
-
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+from app_config import (
+    CHECKPOINT_BASE,
+    EVALUATION_OUTPUT,
+    PYTHON_EXE,
+    RESULTS_DIR_ROOT,
+    SCREENSHOT_ROOT,
+    TRAIN_SCRIPT,
+    WATERMARK_TEXT_DEFAULT,
+    ensure_runtime_directories,
+)
+from auth_store import signin_user, signup_user
+from checkpoint_utils import find_all_checkpoints, find_run_folders
+from simulation_utils import (
+    sample_multi_agent_actions,
+    select_render_frame,
+    step_environment,
+)
 
 # TensorBoard imports
 try:
@@ -45,7 +48,6 @@ except ImportError:
 # MetaDrive Imports
 PANDA3D_AVAILABLE = False
 MULTI_AGENT_CLASS = None
-IDMPolicy = None
 
 try:
     from metadrive.envs.marl_envs.multi_agent_metadrive import MultiAgentMetaDrive
@@ -58,62 +60,6 @@ except Exception:
         PANDA3D_AVAILABLE = True
     except Exception:
         pass
-
-try:
-    from metadrive.policy.idm_policy import IDMPolicy
-except Exception:
-    IDMPolicy = None
-
-
-# -------------------------
-# Signup / Signin (File Handling)
-# -------------------------
-USERS_FILE = "users.json"
-
-def load_users():
-    if not os.path.exists(USERS_FILE):
-        return {}
-    with open(USERS_FILE, "r") as f:
-        return json.load(f)
-
-def save_users(users):
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f, indent=4)
-
-def signup_user(username, email, password):
-    users = load_users()
-
-    if username in users:
-        return False, "User already exists"
-
-    users[username] = {
-        "email": email,
-        "password": password
-    }
-    save_users(users)
-    return True, "Signup successful. Please login."
-
-def signin_user(username, password):
-    users = load_users()
-
-    if username in users and users[username]["password"] == password:
-        return True
-    return False
-
-
-# -------------------------
-# Paths & Configuration
-# -------------------------
-RESULTS_DIR_ROOT = Path(r"D:\AutonomousVehicleFYP\MAPPO_AVs\mappo\results")
-CHECKPOINT_BASE = RESULTS_DIR_ROOT / "MyEnv" / "Intersection_MAPPO"
-TRAIN_SCRIPT = Path(r"D:\AutonomousVehicleFYP\MAPPO_AVs\mappo\train\train.py")
-PYTHON_EXE = r"C:\Users\QC\AppData\Local\Programs\Python\Python38\python.exe"
-SCREENSHOT_ROOT = Path(r"D:\AutonomousVehicleFYP\FYP_Screenshots")
-EVALUATION_OUTPUT = Path(r"D:\AutonomousVehicleFYP\evaluation_results")
-EVALUATION_OUTPUT.mkdir(parents=True, exist_ok=True)
-SCREENSHOT_ROOT.mkdir(parents=True, exist_ok=True)
-
-WATERMARK_TEXT_DEFAULT = "Imran Ashraf, VLCMatrix Lab | FYP Documentation"
 
 # -------------------------
 # Utility Functions
@@ -163,52 +109,32 @@ def save_image(arr, out_path):
         except Exception:
             raise
 
-# -------------------------
-# Model Evaluation Functions
-# -------------------------
-def find_all_checkpoints():
-    """Find all available model checkpoints - finds all runs."""
-    checkpoints = {
-        'MAPPO': [],
-        'RMAPPO': []
-    }
-    
-    for algo in ['mappo', 'rmappo']:
-        algo_path = CHECKPOINT_BASE / algo / "check"
-        if algo_path.exists():
-            run_folders = sorted(algo_path.glob("run*"), key=lambda x: x.name)
-            
-            for run_folder in run_folders:
-                model_path = run_folder / "models"
-                if model_path.exists() and (model_path / "actor.pt").exists():
-                    checkpoints[algo.upper()].append({
-                        'run': run_folder.name,
-                        'path': str(model_path),
-                        'algo': algo,
-                        'full_path': str(run_folder)
-                    })
-    
-    return checkpoints
-
 def evaluate_model_sync(checkpoint_path, algo_name, render=True, num_agents=4):
-    """
-    Evaluate model using subprocess (synchronous).
-    For MAPPO we must explicitly disable recurrent policy,
-    otherwise train.py raises 'check recurrent policy!' AssertionError.
-    """
+    """Evaluate a saved MAPPO/RMAPPO checkpoint in a subprocess."""
+    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+    algorithm = algo_name.lower()
+
+    if algorithm not in {"mappo", "rmappo"}:
+        return _evaluation_error(f"Unsupported algorithm: {algo_name}")
+    if not TRAIN_SCRIPT.is_file():
+        return _evaluation_error(f"Training script not found: {TRAIN_SCRIPT}")
+    shared_policy = (checkpoint_path / "actor.pt").is_file()
+    separated_policy = (checkpoint_path / "actor_agent0.pt").is_file()
+    if not (shared_policy or separated_policy):
+        return _evaluation_error(f"No actor checkpoint found in: {checkpoint_path}")
+
     cmd = [
         PYTHON_EXE,
         str(TRAIN_SCRIPT),
         "--eval",
-        "--eval_model_dir", checkpoint_path,
-        "--algorithm_name", algo_name.lower(),
+        "--eval_model_dir", str(checkpoint_path),
+        "--algorithm_name", algorithm,
         "--num_agents", str(num_agents),
         "--scenario_name", "Intersection_MAPPO",
     ]
 
-    if algo_name.lower() == "mappo":
-        cmd.append("--use_recurrent_policy")
-
+    if separated_policy:
+        cmd.append("--share_policy")
     if render:
         cmd.append("--use_render_eval")
 
@@ -228,19 +154,18 @@ def evaluate_model_sync(checkpoint_path, algo_name, render=True, num_agents=4):
             "returncode": result.returncode,
         }
     except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "Evaluation timeout (10 minutes)",
-            "returncode": -1,
-        }
+        return _evaluation_error("Evaluation timed out after 10 minutes.")
     except Exception as e:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": str(e),
-            "returncode": -1,
-        }
+        return _evaluation_error(str(e))
+
+
+def _evaluation_error(message):
+    return {
+        "success": False,
+        "stdout": "",
+        "stderr": message,
+        "returncode": -1,
+    }
 
 def evaluate_model_and_record_video(checkpoint_path, algo_name, out_dir: Path, num_agents=4):
     """
@@ -250,47 +175,79 @@ def evaluate_model_and_record_video(checkpoint_path, algo_name, out_dir: Path, n
     if not MSS_AVAILABLE:
         raise RuntimeError("The 'mss' package is required for recording. Install it with: pip install mss")
 
+    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+    algorithm = algo_name.lower()
+    if algorithm not in {"mappo", "rmappo"}:
+        raise ValueError(f"Unsupported algorithm: {algo_name}")
+    if not TRAIN_SCRIPT.is_file():
+        raise FileNotFoundError(f"Training script not found: {TRAIN_SCRIPT}")
+    shared_policy = (checkpoint_path / "actor.pt").is_file()
+    separated_policy = (checkpoint_path / "actor_agent0.pt").is_file()
+    if not (shared_policy or separated_policy):
+        raise FileNotFoundError(f"No actor checkpoint found in: {checkpoint_path}")
+
     out_dir.mkdir(parents=True, exist_ok=True)
+    video_path = out_dir / "evaluation_simulation.gif"
 
     cmd = [
         PYTHON_EXE,
         str(TRAIN_SCRIPT),
         "--eval",
-        "--eval_model_dir", checkpoint_path,
-        "--algorithm_name", algo_name.lower(),
+        "--eval_model_dir", str(checkpoint_path),
+        "--algorithm_name", algorithm,
         "--num_agents", str(num_agents),
         "--scenario_name", "Intersection_MAPPO",
         "--use_render_eval"
     ]
 
-    if algo_name.lower() == "mappo":
-        cmd.append("--use_recurrent_policy")
+    if separated_policy:
+        cmd.append("--share_policy")
 
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(TRAIN_SCRIPT.parent),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
+    with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stdout_file, \
+            tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stderr_file:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(TRAIN_SCRIPT.parent),
+            stdout=stdout_file,
+            stderr=stderr_file,
+            text=True,
+        )
 
-    video_frames = []
+        frame_count = 0
+        try:
+            with mss.mss() as sct, imageio.get_writer(video_path, mode="I", fps=15) as writer:
+                monitor = sct.monitors[1]
+                while proc.poll() is None:
+                    img = sct.grab(monitor)
+                    frame = Image.frombytes("RGB", img.size, img.rgb)
+                    writer.append_data(np.asarray(frame))
+                    frame_count += 1
+                    time.sleep(1 / 15)
 
-    with mss.mss() as sct:
-        monitor = sct.monitors[1]
+            return_code = proc.wait()
+        except Exception:
+            video_path.unlink(missing_ok=True)
+            raise
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
 
-        while proc.poll() is None:
-            img = sct.grab(monitor)
-            frame = Image.frombytes("RGB", img.size, img.rgb)
-            video_frames.append(np.array(frame))
-            time.sleep(1/15)
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = stdout_file.read()
+        stderr = stderr_file.read()
 
-    stdout, stderr = proc.communicate()
-
-    video_path = out_dir / "evaluation_simulation.gif"
-    if video_frames:
-        imageio.mimsave(video_path, video_frames, fps=15)
-
-    return video_path, stdout.decode("utf-8", errors="ignore") if isinstance(stdout, bytes) else stdout, stderr.decode("utf-8", errors="ignore") if isinstance(stderr, bytes) else stderr
+    if return_code != 0:
+        raise RuntimeError(stderr or f"Evaluation exited with code {return_code}.")
+    if frame_count == 0:
+        video_path.unlink(missing_ok=True)
+        raise RuntimeError("Evaluation completed before any video frames were captured.")
+    return video_path, stdout, stderr
 
 # -------------------------
 # Simulation Runner
@@ -312,7 +269,6 @@ def run_simulation_and_capture(map_code, num_agents, traffic_density, traffic_mo
         "traffic_mode": str(traffic_mode),
         "use_render": True,
         "horizon": max(steps, 1000),
-        "agent_policy": IDMPolicy if traffic_density > 0.0 and IDMPolicy else "RandomPolicy",
     }
 
     try:
@@ -333,14 +289,9 @@ def run_simulation_and_capture(map_code, num_agents, traffic_density, traffic_mo
         st_progress = st.progress(0)
 
         while step < steps:
-            actions = {agent_id: env.action_space.sample() for agent_id in env.agents.keys()}
-
-            env.step(actions)
-
-            frame = env.render(mode="rgb_array")
-
-            if isinstance(frame, dict):
-                frame = frame.get("main_camera", list(frame.values())[0] if frame else None)
+            actions = sample_multi_agent_actions(env)
+            episode_done = step_environment(env, actions)
+            frame = select_render_frame(env.render(mode="rgb_array"))
 
             if isinstance(frame, np.ndarray):
                 video_frames.append(frame)
@@ -355,7 +306,7 @@ def run_simulation_and_capture(map_code, num_agents, traffic_density, traffic_mo
             st_progress.progress(min(1.0, (step + 1) / steps))
 
             step += 1
-            if all(env.dones.values()):
+            if episode_done:
                 break
 
         st_status.success(f"Simulation complete! Saved {len(saved_files)} screenshots.")
@@ -386,13 +337,13 @@ def load_individual_algorithm_metrics(algo_name):
         return
     
     base_scenario_path = RESULTS_DIR_ROOT / 'MyEnv/Intersection_MAPPO'
-    algo_folder = base_scenario_path / algo_name.lower() / "check"
+    algo_folder = base_scenario_path / algo_name.lower()
     
     if not algo_folder.exists():
         st.error(f"Path not found: {algo_folder}")
         return
     
-    run_folders = sorted([p for p in algo_folder.glob('run*') if p.is_dir()])
+    run_folders = find_run_folders(algo_folder)
     if not run_folders:
         st.error("No run folders found.")
         return
@@ -500,8 +451,8 @@ def load_and_plot_mappo_rewards():
     base_scenario_path = RESULTS_DIR_ROOT / 'MyEnv/Intersection_MAPPO'
     
     algo_paths = {
-        "MAPPO": base_scenario_path / "mappo" / "check",
-        "RMAPPO": base_scenario_path / "rmappo" / "check",
+        "MAPPO": base_scenario_path / "mappo",
+        "RMAPPO": base_scenario_path / "rmappo",
     }
     
     reward_data = {}
@@ -512,7 +463,7 @@ def load_and_plot_mappo_rewards():
             if not base_folder.exists():
                 continue
                 
-            run_folders = sorted([p for p in base_folder.glob('run*') if p.is_dir()])
+            run_folders = find_run_folders(base_folder)
             if not run_folders:
                 continue
             
@@ -588,8 +539,8 @@ def load_and_plot_all_metrics():
     base_scenario_path = RESULTS_DIR_ROOT / 'MyEnv/Intersection_MAPPO'
     
     algo_paths = {
-        "MAPPO": base_scenario_path / "mappo" / "check",
-        "RMAPPO": base_scenario_path / "rmappo" / "check",
+        "MAPPO": base_scenario_path / "mappo",
+        "RMAPPO": base_scenario_path / "rmappo",
     }
     
     algo_metrics = {}
@@ -599,7 +550,7 @@ def load_and_plot_all_metrics():
             if not base_folder.exists():
                 continue
             
-            run_folders = sorted([p for p in base_folder.glob('run*') if p.is_dir()])
+            run_folders = find_run_folders(base_folder)
             if not run_folders:
                 continue
             
@@ -755,10 +706,17 @@ def login_page():
         new_username = st.text_input("Username", key="su_user")
         email = st.text_input("Email", key="su_email")
         new_password = st.text_input("Password", type="password", key="su_pass")
+        confirm_password = st.text_input(
+            "Confirm password",
+            type="password",
+            key="su_pass_confirm",
+        )
 
         if st.button("Sign Up"):
-            if not new_username or not email or not new_password:
+            if not new_username or not email or not new_password or not confirm_password:
                 st.error("All fields are required")
+            elif new_password != confirm_password:
+                st.error("Passwords do not match.")
             else:
                 success, msg = signup_user(new_username, email, new_password)
                 if success:
@@ -771,6 +729,7 @@ def login_page():
 # -------------------------
 def main():
     st.set_page_config(layout="wide", page_title="MARL Dashboard - UOL", page_icon="🎓")
+    ensure_runtime_directories()
     
     if "logged_in" not in st.session_state:
         st.session_state["logged_in"] = False
@@ -995,7 +954,7 @@ def main():
         st.markdown("<div class='section-title'>Trained Model Evaluation</div>", unsafe_allow_html=True)
         
         with st.spinner("Scanning for trained models..."):
-            checkpoints = find_all_checkpoints()
+            checkpoints = find_all_checkpoints(CHECKPOINT_BASE)
         
         col1c, col2c = st.columns([2, 1])
         
@@ -1035,7 +994,7 @@ def main():
             )
         
         with eval_col2:
-            available_runs = [cp['run'] for cp in checkpoints[algo_choice]]
+            available_runs = [cp['label'] for cp in checkpoints[algo_choice]]
             if available_runs:
                 run_choice = st.selectbox(
                     "Select Run",
@@ -1058,7 +1017,7 @@ def main():
         
         if run_choice:
             selected_checkpoint = next(
-                (cp for cp in checkpoints[algo_choice] if cp['run'] == run_choice),
+                (cp for cp in checkpoints[algo_choice] if cp['label'] == run_choice),
                 None
             )
             

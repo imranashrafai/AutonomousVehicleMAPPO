@@ -24,6 +24,8 @@ __pycache__/
 # Local application data and credentials
 users.json
 tickets.json
+support_tickets.json
+.local_data/
 .env
 .env.*
 *.pem

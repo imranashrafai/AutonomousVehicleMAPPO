@@ -1,20 +1,18 @@
-import random
-import time
 import os
-# 👉 NEW imports
+import time
+from collections import defaultdict
 from pathlib import Path
-import imageio
 
+import imageio
 import numpy as np
 from metadrive import (
-    MultiAgentMetaDrive, MultiAgentTollgateEnv, MultiAgentBottleneckEnv, MultiAgentIntersectionEnv,
-    MultiAgentRoundaboutEnv, MultiAgentParkingLotEnv
+    MultiAgentBottleneckEnv,
+    MultiAgentIntersectionEnv,
+    MultiAgentMetaDrive,
+    MultiAgentParkingLotEnv,
+    MultiAgentRoundaboutEnv,
+    MultiAgentTollgateEnv,
 )
-import argparse
-from metadrive.constants import HELP_MESSAGE
-from metadrive.policy.idm_policy import ManualControllableIDMPolicy
-from collections import defaultdict
-import numpy as np
 import json
 
 envs = dict(
@@ -25,14 +23,12 @@ envs = dict(
     parkinglot=MultiAgentParkingLotEnv,
     pgma=MultiAgentMetaDrive
 )
-envs = dict(
-    roundabout=MultiAgentRoundaboutEnv,
-    intersection=MultiAgentIntersectionEnv,
-    tollgate=MultiAgentTollgateEnv,
-    bottleneck=MultiAgentBottleneckEnv,
-    parkinglot=MultiAgentParkingLotEnv,
-    pgma=MultiAgentMetaDrive
-)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+MAPPO_ROOT = Path(__file__).resolve().parents[1]
+EVALUATION_DIR = Path(
+    os.getenv("AV_MAPPO_EVALUATION_DIR", str(PROJECT_ROOT / ".local_data" / "evaluations"))
+).expanduser().resolve()
 
 class EnvCore(object):
     """
@@ -66,13 +62,13 @@ class EnvCore(object):
         self.video_path = None
 
         if self.record_video:
-            # Save eval videos in a fixed folder (same as your dashboard constant)
-            video_dir = Path(r"D:\AutonomousVehicleFYP\evaluation_results")
-            video_dir.mkdir(parents=True, exist_ok=True)
+            EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
 
             time_str = time.strftime("%Y%m%d_%H%M%S")
-            # Example: mappo_intersection_20241202_153000.mp4
-            self.video_path = video_dir / f"{self.args.algorithm_name}_{self.args.env}_{time_str}.mp4"
+            self.video_path = (
+                EVALUATION_DIR
+                / f"{self.args.algorithm_name}_{self.args.env}_{time_str}.mp4"
+            )
 
             # Use H.264 for normal MP4 playback
             self.video_writer = imageio.get_writer(
@@ -84,7 +80,8 @@ class EnvCore(object):
 
     def reset(self):
         state = self.env.reset()
-        sub_agent_obs = list(state[0].values())
+        observations = state[0] if isinstance(state, tuple) else state
+        sub_agent_obs = list(observations.values())
         return sub_agent_obs
 
     def _record_frame_if_needed(self):
@@ -104,13 +101,22 @@ class EnvCore(object):
         self.time_step += 1
         self.temp_time_step += 1
 
-        sub_agent_obs, reward, done, truncateds, info = self.env.step(
+        result = self.env.step(
             {agent_id: action for agent_id, action in zip(self.env.vehicles.keys(), actions)}
         )
+        if len(result) == 5:
+            sub_agent_obs, reward, done, truncateds, info = result
+            done = {
+                key: bool(value) or bool(truncateds.get(key, False))
+                for key, value in done.items()
+            }
+        else:
+            sub_agent_obs, reward, done, info = result
+
         sub_agent_obs = list(sub_agent_obs.values())
         sub_agent_reward = list(reward.values())
-        sub_agent_done = list(done.values())[:-1]
-        sub_agent_info = list(info.values())
+        sub_agent_done = [value for key, value in done.items() if key != "__all__"]
+        sub_agent_info = [value for key, value in info.items() if key != "__all__"]
 
         # ---------- NEW: record frame each env step during eval ----------
         self._record_frame_if_needed()
@@ -186,8 +192,8 @@ class EnvCore(object):
                     return [convert_float32_to_float(item) for item in obj]
                 elif isinstance(obj, tuple):
                     return tuple(convert_float32_to_float(item) for item in obj)
-                elif isinstance(obj, np.float32):
-                    return float(obj)
+                elif isinstance(obj, np.generic):
+                    return obj.item()
                 else:
                     return obj
 
@@ -199,22 +205,35 @@ class EnvCore(object):
             })
 
             total_reward = sum(info.get("episode_reward", 0) for info in self.agent_done_info)
-            avg_reward = total_reward / len(self.agent_done_info)
+            avg_reward = (
+                total_reward / len(self.agent_done_info)
+                if self.agent_done_info
+                else 0.0
+            )
             self.reward_data[self.epoch].append(avg_reward)
 
-            output_dir = f"results/{self.args.env_name}/{self.args.scenario_name}/{self.args.algorithm_name}/check/{self.args.run_num}/logs"
-            os.makedirs(output_dir, exist_ok=True)
+            output_dir = (
+                MAPPO_ROOT
+                / "results"
+                / self.args.env_name
+                / self.args.scenario_name
+                / self.args.algorithm_name
+                / self.args.experiment_name
+                / str(self.args.run_num)
+                / "logs"
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-            reward_file = os.path.join(output_dir, 'reward_data.json')
-            with open(reward_file, 'w') as file:
+            reward_file = output_dir / "reward_data.json"
+            with reward_file.open("w", encoding="utf-8") as file:
                 json.dump(dict(self.reward_data), file)
 
-            metrics_file = os.path.join(output_dir, 'metrics_data.json')
-            with open(metrics_file, 'w') as file:
+            metrics_file = output_dir / "metrics_data.json"
+            with metrics_file.open("w", encoding="utf-8") as file:
                 json.dump(dict(self.metrics_data), file)
 
-            agent_done_info_file = os.path.join(output_dir, 'agent_done_info_data.json')
-            with open(agent_done_info_file, 'w') as file:
+            agent_done_info_file = output_dir / "agent_done_info_data.json"
+            with agent_done_info_file.open("w", encoding="utf-8") as file:
                 json.dump(self.agent_done_info_data, file, indent=4)
 
             self.agent_done_info.clear()

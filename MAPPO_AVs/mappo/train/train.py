@@ -1,29 +1,21 @@
 import random
 import sys
-import os
-import setproctitle
-import numpy as np
 from pathlib import Path
-import torch
+
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
+import setproctitle
+import torch
 from metadrive.component.sensors.rgb_camera import RGBCamera
-from metadrive.policy.idm_policy import IDMPolicy
-from metadrive.policy.expert_policy import ExpertPolicy
 from metadrive.obs.state_obs import LidarStateObservation
 
-VENV_SITE_PACKAGES_PATH = r"D:\AutonomousVehicleFYP\marl_fyp\Lib\site-packages" 
-if VENV_SITE_PACKAGES_PATH not in sys.path:
-    sys.path.insert(0, VENV_SITE_PACKAGES_PATH)
-    
-script_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(script_dir))
-# -----------------------------------------------------------------------------
-
-from config import get_config # This import should now succeed
-from envs.env_wrappers import DummyVecEnv
+MAPPO_ROOT = Path(__file__).resolve().parents[1]
+if str(MAPPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(MAPPO_ROOT))
 
 from config import get_config
-from envs.env_wrappers import DummyVecEnv
 
 
 def parse_args(args, parser):
@@ -74,33 +66,28 @@ def main(args):
         device = torch.device("cpu")
         torch.set_num_threads(all_args.n_training_threads)
 
-    # run dir
-    run_dir = (
-            Path(os.path.split(os.path.dirname(os.path.abspath(__file__)))[0] + "/results")
-            / all_args.env_name
-            / all_args.scenario_name
-            / all_args.algorithm_name
-            / all_args.experiment_name
+    run_base = (
+        MAPPO_ROOT
+        / "results"
+        / all_args.env_name
+        / all_args.scenario_name
+        / all_args.algorithm_name
+        / all_args.experiment_name
     )
-    if not run_dir.exists():
-        os.makedirs(str(run_dir))
+    run_base.mkdir(parents=True, exist_ok=True)
+    existing_run_numbers = []
+    for folder in run_base.iterdir():
+        if not folder.is_dir() or not folder.name.startswith("run"):
+            continue
+        try:
+            existing_run_numbers.append(int(folder.name[3:]))
+        except ValueError:
+            continue
 
-    if not run_dir.exists():
-        curr_run = "run1"
-    else:
-        exst_run_nums = [
-            int(str(folder.name).split("run")[1])
-            for folder in run_dir.iterdir()
-            if str(folder.name).startswith("run")
-        ]
-        if len(exst_run_nums) == 0:
-            curr_run = "run1"
-        else:
-            curr_run = "run%i" % (max(exst_run_nums) + 1)
+    curr_run = f"run{max(existing_run_numbers, default=0) + 1}"
     all_args.run_num = curr_run
-    run_dir = run_dir / curr_run
-    if not run_dir.exists():
-        os.makedirs(str(run_dir))
+    run_dir = run_base / curr_run
+    run_dir.mkdir(parents=True, exist_ok=False)
 
     setproctitle.setproctitle(
         str(all_args.algorithm_name)
@@ -224,7 +211,7 @@ def main(args):
         # Close the environment
         runner.eval_envs.close()
     else:
-        #Normal training process
+        # Normal training process
         runner = Runner(config)
         runner.run()
 
@@ -236,15 +223,15 @@ def main(args):
         runner.writter.export_scalars_to_json(str(runner.log_dir + "/summary.json"))
         runner.writter.close()
 
-    fig, ax = plt.subplots()
-    ax.plot(range(1, len(config["total_reward"]) + 1), config["total_reward"])
-    ax.set_xlabel('Epoches')
-    ax.set_ylabel('Training Reward')
-    ax.set_title('Training Reward')
-    plt.savefig('Training Reward.png')
-
-    # Display the plot
-    plt.show()
+        if config["total_reward"]:
+            fig, ax = plt.subplots()
+            ax.plot(range(1, len(config["total_reward"]) + 1), config["total_reward"])
+            ax.set_xlabel("Epochs")
+            ax.set_ylabel("Training Reward")
+            ax.set_title("Training Reward")
+            fig.tight_layout()
+            fig.savefig(run_dir / "training_reward.png")
+            plt.close(fig)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

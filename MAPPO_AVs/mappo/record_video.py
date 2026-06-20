@@ -1,39 +1,117 @@
-import os
-import cv2
-import metadrive.engine.asset_loader as asset_loader
-from metadrive.envs.marl_envs import MultiAgentIntersectionEnv
-from stable_baselines3 import PPO  # Replace with your RL framework
+"""Record a portable multi-agent MetaDrive demonstration video."""
 
-# --- DISABLE FUSE MOUNT ---
-asset_loader.DISABLE_MOUNT = True
+from __future__ import annotations
 
-MODEL_PATH = r"D:\AutonomousVehicleFYP\MAPPO_AVs\mappo\results\MyEnv\Intersection_MAPPO\rmappo\check\run1\models"
-VIDEO_OUTPUT = r"D:\AutonomousVehicleFYP\MAPPO_AVs\mappo\videos\intersection.mp4"
+import argparse
+import sys
+from pathlib import Path
 
-NUM_AGENTS = 4
-FPS = 30
+import numpy as np
 
-env = MultiAgentIntersectionEnv(num_agents=NUM_AGENTS, traffic_density=0.2, use_render=True)
 
-agents = []
-for i in range(NUM_AGENTS):
-    agent_file = os.path.join(MODEL_PATH, f"agent_{i}.zip")
-    agents.append(PPO.load(agent_file, env=env))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-frames = []
-obs = env.reset()
-done = [False] * NUM_AGENTS
+from simulation_utils import (
+    sample_multi_agent_actions,
+    select_render_frame,
+    step_environment,
+)
 
-while not all(done):
-    actions = [agent.predict(obs[i], deterministic=True)[0] for i, agent in enumerate(agents)]
-    obs, rewards, done, info = env.step(actions)
-    frames.append(env.render(mode="rgb_array"))
+def record_video(
+    output: Path,
+    *,
+    map_code: str,
+    num_agents: int,
+    steps: int,
+    fps: int,
+    seed: int,
+) -> Path:
+    try:
+        import cv2
+        try:
+            from metadrive.envs.marl_envs.multi_agent_metadrive import MultiAgentMetaDrive
+        except ImportError:
+            from metadrive.envs.marl_envs.multi_agent_metadrive import (
+                MultiAgentMetaDriveEnv as MultiAgentMetaDrive,
+            )
+    except ImportError as exc:
+        raise RuntimeError(
+            "Video recording requires MetaDrive and opencv-python. "
+            "Install MAPPO_AVs/requirements.txt first."
+        ) from exc
 
-env.close()
+    output = output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
 
-height, width, _ = frames[0].shape
-video_writer = cv2.VideoWriter(VIDEO_OUTPUT, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (width, height))
-for frame in frames:
-    video_writer.write(frame)
-video_writer.release()
-print(f"Video saved at {VIDEO_OUTPUT}")
+    env = MultiAgentMetaDrive(
+        {
+            "map": map_code,
+            "num_agents": num_agents,
+            "start_seed": seed,
+            "horizon": max(steps, 1000),
+            "use_render": False,
+            "offscreen_render": True,
+        }
+    )
+    writer = None
+
+    try:
+        env.reset()
+        for _ in range(steps):
+            actions = sample_multi_agent_actions(env)
+            episode_done = step_environment(env, actions)
+            frame = select_render_frame(env.render(mode="rgb_array"))
+
+            if isinstance(frame, np.ndarray):
+                if writer is None:
+                    height, width = frame.shape[:2]
+                    writer = cv2.VideoWriter(
+                        str(output),
+                        cv2.VideoWriter_fourcc(*"mp4v"),
+                        fps,
+                        (width, height),
+                    )
+                    if not writer.isOpened():
+                        raise RuntimeError(f"Could not open video writer for {output}")
+                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+            if episode_done:
+                env.reset()
+    finally:
+        if writer is not None:
+            writer.release()
+        env.close()
+
+    if writer is None:
+        raise RuntimeError("MetaDrive did not return any RGB frames.")
+    return output
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=Path("videos/metadrive_demo.mp4"))
+    parser.add_argument("--map", dest="map_code", default="X")
+    parser.add_argument("--num-agents", type=int, default=4)
+    parser.add_argument("--steps", type=int, default=500)
+    parser.add_argument("--fps", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    path = record_video(
+        args.output,
+        map_code=args.map_code,
+        num_agents=max(1, args.num_agents),
+        steps=max(1, args.steps),
+        fps=max(1, args.fps),
+        seed=args.seed,
+    )
+    print(f"Video saved to: {path}")
+
+
+if __name__ == "__main__":
+    main()

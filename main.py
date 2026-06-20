@@ -1,32 +1,31 @@
-# unified_dashboard.py
-import os
 import base64
-import streamlit as st
-import sys
+import subprocess
 import time
-import json
 import traceback
 from pathlib import Path
-import glob
-import subprocess
-import threading
+
 import imageio
-
-
-# Try to insert VENV path early
-try:
-    VENV_PATH = Path(sys.executable).parent.parent / "Lib" / "site-packages"
-    if str(VENV_PATH) not in sys.path:
-        sys.path.insert(0, str(VENV_PATH))
-except Exception:
-    pass
-
+import streamlit as st
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+from app_config import (
+    CHECKPOINT_BASE,
+    PYTHON_EXE,
+    RESULTS_DIR_ROOT,
+    SCREENSHOT_ROOT,
+    TRAIN_SCRIPT,
+    WATERMARK_TEXT_DEFAULT,
+    ensure_runtime_directories,
+)
+from checkpoint_utils import find_all_checkpoints, find_run_folders
+from simulation_utils import (
+    sample_multi_agent_actions,
+    select_render_frame,
+    step_environment,
+)
 
 # TensorBoard imports
 try:
@@ -38,7 +37,6 @@ except ImportError:
 # MetaDrive Imports
 PANDA3D_AVAILABLE = False
 MULTI_AGENT_CLASS = None
-IDMPolicy = None
 
 try:
     from metadrive.envs.marl_envs.multi_agent_metadrive import MultiAgentMetaDrive
@@ -51,25 +49,6 @@ except Exception:
         PANDA3D_AVAILABLE = True
     except Exception:
         pass
-
-try:
-    from metadrive.policy.idm_policy import IDMPolicy
-except Exception:
-    IDMPolicy = None
-
-# -------------------------
-# Paths & Configuration
-# -------------------------
-RESULTS_DIR_ROOT = Path(r"D:\AutonomousVehicleFYP\MAPPO_AVs\mappo\results")
-CHECKPOINT_BASE = RESULTS_DIR_ROOT / "MyEnv" / "Intersection_MAPPO"
-TRAIN_SCRIPT = Path(r"D:\AutonomousVehicleFYP\MAPPO_AVs\mappo\train\train.py")
-PYTHON_EXE = r"C:\Users\QC\AppData\Local\Programs\Python\Python38\python.exe"
-SCREENSHOT_ROOT = Path(r"D:\AutonomousVehicleFYP\FYP_Screenshots")
-EVALUATION_OUTPUT = Path(r"D:\AutonomousVehicleFYP\evaluation_results")
-EVALUATION_OUTPUT.mkdir(parents=True, exist_ok=True)
-SCREENSHOT_ROOT.mkdir(parents=True, exist_ok=True)
-
-WATERMARK_TEXT_DEFAULT = "Imran Ashraf, VLCMatrix Lab | FYP Documentation"
 
 # -------------------------
 # Utility Functions
@@ -118,49 +97,32 @@ def save_image(arr, out_path):
         except Exception:
             raise
 
-# -------------------------
-# Model Evaluation Functions
-# -------------------------
-def find_all_checkpoints():
-    """Find all available model checkpoints - FIXED to find all runs."""
-    checkpoints = {
-        'MAPPO': [],
-        'RMAPPO': []
-    }
-    
-    for algo in ['mappo', 'rmappo']:
-        algo_path = CHECKPOINT_BASE / algo / "check"
-        if algo_path.exists():
-            # Get ALL run folders, not just limited ones
-            run_folders = sorted(algo_path.glob("run*"), key=lambda x: x.name)
-            
-            for run_folder in run_folders:
-                model_path = run_folder / "models"
-                # Check if the models directory exists and has actor.pt
-                if model_path.exists() and (model_path / "actor.pt").exists():
-                    checkpoints[algo.upper()].append({
-                        'run': run_folder.name,
-                        'path': str(model_path),
-                        'algo': algo,
-                        'full_path': str(run_folder)
-                    })
-    
-    return checkpoints
-
 def evaluate_model_sync(checkpoint_path, algo_name, render=True, num_agents=4):
-    """
-    Evaluate model using subprocess (synchronous) - FIXED render flag.
-    """
+    """Evaluate a saved MAPPO/RMAPPO checkpoint in a subprocess."""
+    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+    algorithm = algo_name.lower()
+
+    if algorithm not in {"mappo", "rmappo"}:
+        return _evaluation_error(f"Unsupported algorithm: {algo_name}")
+    if not TRAIN_SCRIPT.is_file():
+        return _evaluation_error(f"Training script not found: {TRAIN_SCRIPT}")
+    shared_policy = (checkpoint_path / "actor.pt").is_file()
+    separated_policy = (checkpoint_path / "actor_agent0.pt").is_file()
+    if not (shared_policy or separated_policy):
+        return _evaluation_error(f"No actor checkpoint found in: {checkpoint_path}")
+
     cmd = [
         PYTHON_EXE,
         str(TRAIN_SCRIPT),
         "--eval",
-        "--eval_model_dir", checkpoint_path,
-        "--algorithm_name", algo_name.lower(),
-        "--num_agents", str(num_agents)
+        "--eval_model_dir", str(checkpoint_path),
+        "--algorithm_name", algorithm,
+        "--num_agents", str(num_agents),
+        "--scenario_name", "Intersection_MAPPO",
     ]
     
-    # Only add render flag if render is True
+    if separated_policy:
+        cmd.append("--share_policy")
     if render:
         cmd.append("--use_render_eval")
     
@@ -174,25 +136,24 @@ def evaluate_model_sync(checkpoint_path, algo_name, render=True, num_agents=4):
         )
         
         return {
-            'success': result.returncode == 0,
-            'stdout': result.stdout,
-            'stderr': result.stderr,
-            'returncode': result.returncode
+            "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode,
         }
     except subprocess.TimeoutExpired:
-        return {
-            'success': False,
-            'stdout': '',
-            'stderr': 'Evaluation timeout (10 minutes)',
-            'returncode': -1
-        }
+        return _evaluation_error("Evaluation timed out after 10 minutes.")
     except Exception as e:
-        return {
-            'success': False,
-            'stdout': '',
-            'stderr': str(e),
-            'returncode': -1
-        }
+        return _evaluation_error(str(e))
+
+
+def _evaluation_error(message):
+    return {
+        "success": False,
+        "stdout": "",
+        "stderr": message,
+        "returncode": -1,
+    }
 
 # -------------------------
 # Simulation Runner
@@ -206,7 +167,6 @@ def run_simulation_and_capture(map_code, num_agents, traffic_density, traffic_mo
     if not MULTI_AGENT_CLASS:
         raise RuntimeError("Fatal: MultiAgentMetaDrive class not found. Check MetaDrive installation.")
 
-    # Configure the environment (kept same, safe)
     env_config = {
         "map": map_code,
         "num_agents": max(1, int(num_agents)),
@@ -215,7 +175,6 @@ def run_simulation_and_capture(map_code, num_agents, traffic_density, traffic_mo
         "traffic_mode": str(traffic_mode),
         "use_render": True,
         "horizon": max(steps, 1000),
-        "agent_policy": IDMPolicy if traffic_density > 0.0 and IDMPolicy else "RandomPolicy",
     }
 
     # Instantiate environment
@@ -239,33 +198,10 @@ def run_simulation_and_capture(map_code, num_agents, traffic_density, traffic_mo
         st_progress = st.progress(0)
 
         while step < steps:
-            # ---------- FASTER ACTIONS HERE ----------
-            # Base action from env
-            base_action = env.action_space.sample()
+            actions = sample_multi_agent_actions(env, accelerate=True)
+            episode_done = step_environment(env, actions)
 
-            # If action is continuous (common case), force straight + full throttle
-            if isinstance(base_action, np.ndarray) and base_action.shape[0] >= 2:
-                base_action = base_action.astype(np.float32)
-                # Index 0 = steering, 1 = throttle/brake in MetaDrive
-                base_action[0] = 0.0   # no steering (straight)
-                base_action[1] = 1.0   # full throttle (max acceleration)
-
-            # Same fast action for all controllable agents
-            actions = {
-                agent_id: (base_action.copy() if isinstance(base_action, np.ndarray) else base_action)
-                for agent_id in env.agents.keys()
-            }
-            # -----------------------------------------
-
-            # Step environment
-            env.step(actions)
-
-            # Render frame
-            frame = env.render(mode="rgb_array")
-
-            # Handle dict frames (MetaDrive sometimes returns dict of cameras)
-            if isinstance(frame, dict):
-                frame = frame.get("main_camera", list(frame.values())[0] if frame else None)
+            frame = select_render_frame(env.render(mode="rgb_array"))
 
             # Save frame into video buffer
             if isinstance(frame, np.ndarray):
@@ -283,7 +219,7 @@ def run_simulation_and_capture(map_code, num_agents, traffic_density, traffic_mo
             st_progress.progress(min(1.0, (step + 1) / steps))
 
             step += 1
-            if all(env.dones.values()):
+            if episode_done:
                 break
 
         st_status.success(f"Simulation complete! Saved {len(saved_files)} screenshots.")
@@ -315,13 +251,13 @@ def load_individual_algorithm_metrics(algo_name):
         return
     
     base_scenario_path = RESULTS_DIR_ROOT / 'MyEnv/Intersection_MAPPO'
-    algo_folder = base_scenario_path / algo_name.lower() / "check"
+    algo_folder = base_scenario_path / algo_name.lower()
     
     if not algo_folder.exists():
         st.error(f"Path not found: {algo_folder}")
         return
     
-    run_folders = sorted([p for p in algo_folder.glob('run*') if p.is_dir()])
+    run_folders = find_run_folders(algo_folder)
     if not run_folders:
         st.error("No run folders found.")
         return
@@ -429,8 +365,8 @@ def load_and_plot_mappo_rewards():
     base_scenario_path = RESULTS_DIR_ROOT / 'MyEnv/Intersection_MAPPO'
     
     algo_paths = {
-        "MAPPO": base_scenario_path / "mappo" / "check",
-        "RMAPPO": base_scenario_path / "rmappo" / "check",
+        "MAPPO": base_scenario_path / "mappo",
+        "RMAPPO": base_scenario_path / "rmappo",
     }
     
     reward_data = {}
@@ -441,7 +377,7 @@ def load_and_plot_mappo_rewards():
             if not base_folder.exists():
                 continue
                 
-            run_folders = sorted([p for p in base_folder.glob('run*') if p.is_dir()])
+            run_folders = find_run_folders(base_folder)
             if not run_folders:
                 continue
             
@@ -517,8 +453,8 @@ def load_and_plot_all_metrics():
     base_scenario_path = RESULTS_DIR_ROOT / 'MyEnv/Intersection_MAPPO'
     
     algo_paths = {
-        "MAPPO": base_scenario_path / "mappo" / "check",
-        "RMAPPO": base_scenario_path / "rmappo" / "check",
+        "MAPPO": base_scenario_path / "mappo",
+        "RMAPPO": base_scenario_path / "rmappo",
     }
     
     algo_metrics = {}
@@ -528,7 +464,7 @@ def load_and_plot_all_metrics():
             if not base_folder.exists():
                 continue
             
-            run_folders = sorted([p for p in base_folder.glob('run*') if p.is_dir()])
+            run_folders = find_run_folders(base_folder)
             if not run_folders:
                 continue
             
@@ -662,6 +598,7 @@ def get_img_as_base64(file_path):
 # -------------------------
 def main():
     st.set_page_config(layout="wide", page_title="MARL Dashboard - UOL", page_icon="🎓")
+    ensure_runtime_directories()
     
     # CSS Styling
     st.markdown("""
@@ -873,7 +810,7 @@ def main():
         
         # Find all checkpoints
         with st.spinner("Scanning for trained models..."):
-            checkpoints = find_all_checkpoints()
+            checkpoints = find_all_checkpoints(CHECKPOINT_BASE)
         
         col1, col2 = st.columns([2, 1])
         
@@ -915,7 +852,7 @@ def main():
             )
         
         with eval_col2:
-            available_runs = [cp['run'] for cp in checkpoints[algo_choice]]
+            available_runs = [cp['label'] for cp in checkpoints[algo_choice]]
             if available_runs:
                 run_choice = st.selectbox(
                     "Select Run",
@@ -934,7 +871,7 @@ def main():
         
         if run_choice:
             selected_checkpoint = next(
-                (cp for cp in checkpoints[algo_choice] if cp['run'] == run_choice),
+                (cp for cp in checkpoints[algo_choice] if cp['label'] == run_choice),
                 None
             )
             

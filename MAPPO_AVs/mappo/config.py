@@ -32,9 +32,7 @@ def get_config():
         --num_env_steps <int>
             number of env steps to train (default: 10e6)
         --user_name <str>
-            [for wandb usage], to specify user's name for simply collecting training data.
-        --use_wandb
-            [for wandb usage], by default True, will log date to wandb server. or else will use tensorboard to log data.
+            label used in the training process title.
 
     Env parameters:
         --env_name <str>
@@ -216,7 +214,7 @@ def get_config():
         "--user_name",
         type=str,
         default="marl",
-        help="[for wandb usage], to specify user's name for simply collecting training data.",
+        help="Label used in the training process title.",
     )
 
     # env parameters
@@ -304,9 +302,9 @@ def get_config():
     )
     parser.add_argument(
         "--use_recurrent_policy",
-        action="store_false",
-        default=True,
-        help="use a recurrent policy",
+        action="store_true",
+        default=False,
+        help="Use a recurrent policy (automatically enabled for RMAPPO).",
     )
     parser.add_argument("--recurrent_N", type=int, default=1, help="The number of recurrent layers.")
     parser.add_argument(
@@ -467,8 +465,8 @@ def get_config():
     parser.add_argument(
         "--save_gifs",
         action="store_true",
-        default=True,
-        help="by default, do not save render video. If set, save video.",
+        default=False,
+        help="Save rendered episodes as GIF files.",
     )
     parser.add_argument(
         "--use_render",
@@ -480,8 +478,8 @@ def get_config():
     parser.add_argument(
         "--use_render_eval",
         action="store_true",
-        default=True,
-        help="by default, do not render the env during evaling. If set, start render. Note: something, the environment has internal render process which is not controlled by this hyperparam.",
+        default=False,
+        help="Render the environment during evaluation.",
     )
 
 

@@ -1,17 +1,15 @@
 import argparse
-import numpy as np
-
-# Detect correct env class for your MetaDrive 0.4.2
-try:
-    from metadrive.envs.marl_envs.multi_agent_metadrive import MultiAgentMetaDrive
-    ENV_CLS = MultiAgentMetaDrive
-except Exception:
-    from metadrive.envs.marl_envs.multi_agent_metadrive import MultiAgentMetaDriveEnv
-    ENV_CLS = MultiAgentMetaDriveEnv
 
 
 def make_env(map_code: str, num_agents: int, seed: int, horizon: int = 1000):
     """Create multi-agent MetaDrive environment."""
+    try:
+        from metadrive.envs.marl_envs.multi_agent_metadrive import MultiAgentMetaDrive
+        env_class = MultiAgentMetaDrive
+    except ImportError:
+        from metadrive.envs.marl_envs.multi_agent_metadrive import MultiAgentMetaDriveEnv
+        env_class = MultiAgentMetaDriveEnv
+
     config = dict(
         map=map_code,            # X, O, T, S, C, CXSOT, random
         num_agents=num_agents,
@@ -21,7 +19,7 @@ def make_env(map_code: str, num_agents: int, seed: int, horizon: int = 1000):
         traffic_density=0.2,    # add background traffic so it looks busy
         traffic_mode="hybrid",
     )
-    return ENV_CLS(config)
+    return env_class(config)
 
 
 def step_env(env, actions):

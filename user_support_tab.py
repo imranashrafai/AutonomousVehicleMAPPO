@@ -1,40 +1,54 @@
-import streamlit as st
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-SUPPORT_FILE = "support_tickets.json"
+import streamlit as st
+
+from app_config import SUPPORT_FILE
 
 # ---------- Helpers ----------
 def load_tickets():
-    if not Path(SUPPORT_FILE).exists():
+    path = Path(SUPPORT_FILE)
+    if not path.exists():
         return []
     try:
-        with open(SUPPORT_FILE, "r") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
+        tickets = json.loads(path.read_text(encoding="utf-8"))
+        return tickets if isinstance(tickets, list) else []
+    except (OSError, json.JSONDecodeError):
         return []
 
 def save_tickets(tickets):
-    with open(SUPPORT_FILE, "w") as f:
-        json.dump(tickets, f, indent=2)
+    path = Path(SUPPORT_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(
+        json.dumps(tickets, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
 
 def next_ticket_id(tickets):
-    return max([t["id"] for t in tickets], default=0) + 1
+    valid_ids = [
+        ticket.get("id", 0)
+        for ticket in tickets
+        if isinstance(ticket, dict) and isinstance(ticket.get("id", 0), int)
+    ]
+    return max(valid_ids, default=0) + 1
 
 # ---------- Submit ----------
 def submit_ticket(username, subject, description):
     tickets = load_tickets()
     ticket = {
         "id": next_ticket_id(tickets),
-        "user": username,
-        "subject": subject,
-        "description": description,
+        "user": username.strip(),
+        "subject": subject.strip(),
+        "description": description.strip(),
         "status": "Open",
-        "created": datetime.now().strftime("%Y-%m-%d %H:%M")
+        "created": datetime.now(timezone.utc).isoformat(timespec="minutes"),
     }
     tickets.append(ticket)
     save_tickets(tickets)
+    return ticket
 
 # ---------- UI ----------
 def user_support_page():
@@ -55,7 +69,7 @@ def user_support_page():
             submitted = st.form_submit_button("Submit")
 
             if submitted:
-                if not subject or not description:
+                if not subject.strip() or not description.strip():
                     st.error("All fields are required.")
                 else:
                     submit_ticket(username, subject, description)
@@ -63,13 +77,22 @@ def user_support_page():
 
     # View Tickets
     with tab2:
-        tickets = [t for t in load_tickets() if t["user"] == username]
+        tickets = [
+            ticket
+            for ticket in load_tickets()
+            if isinstance(ticket, dict) and ticket.get("user") == username
+        ]
 
         if not tickets:
             st.info("No tickets submitted.")
             return
 
-        for t in tickets:
-            with st.expander(f"#{t['id']} | {t['subject']} | {t['status']}"):
-                st.write(t["description"])
-                st.caption(f"Created: {t['created']}")
+        for ticket in tickets:
+            label = (
+                f"#{ticket.get('id', '?')} | "
+                f"{ticket.get('subject', 'Untitled')} | "
+                f"{ticket.get('status', 'Open')}"
+            )
+            with st.expander(label):
+                st.write(ticket.get("description", ""))
+                st.caption(f"Created: {ticket.get('created', 'Unknown')}")
